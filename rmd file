@@ -1,0 +1,560 @@
+---
+title: "Germany: Model Validation"
+author: "Jessica Marable"
+date: "2024-08-02"
+output: 
+  html_document:
+    theme: journal
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 3
+    number_sections: false
+    fig_caption: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(deSolve)
+library(tidyverse)
+library(kableExtra)
+library(ggplot2)
+options(scipen = 999)
+
+
+```
+
+```{r include=FALSE}
+
+c25 <- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "gray70",
+  "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+  "darkturquoise", "green1", "yellow4", "yellow3",
+  "darkorange4", "brown"
+)
+
+```
+
+
+# Input data 
+
+```{r data preparation, include=FALSE}
+
+males <- read.csv("male_projections_variant_2.csv", sep = ";")
+females <- read.csv("female_projections_variant_2.csv", sep = ";")
+
+nYears     <- dim(males)[[1]]
+nAgeGroups <- dim(males)[[2]]-1
+
+
+m      <- males[1:22, 4:88]
+f      <- females[1:22, 4:88]
+
+
+# create an empty data frame to store prevalence for years and ages 
+
+                              #age,    year
+p_m <- array(data = NA, dim = c(85,    85))
+p_f <- array(data = NA, dim = c(85,    85))
+```
+
+For the prevalence function I used the RKI 2019 diabetes in Germany, assuming the 2013 prevalaence rates for males and females are the same for 2022. 
+
+
+```{r prevalence function, include=FALSE}
+
+get_p0 <- function(age, isMale) {
+  if(age < 18) return(0.002)
+  ageClasses_ <- c(
+                   21, # 18-24
+                   27, # 25-29 
+                   32, # 30-34
+                   37, # 35-39
+                   42, # 40-44
+                   47, # 45-49
+                   52, # 50-54
+                   57, # 55-59
+                   62, # 60-64
+                   67, # 65-69
+                   72, # 70-74
+                   77, # 75-79
+                   82, # 80-84
+                   87, # 85-89
+                   92, # 90-94 
+                   97, # 95-100
+                   100)
+  if(isMale)  # Male Prevalence Rates
+    p0_ <-         c(
+                   0.5, # 18-24
+                   0.6, # 25-29 
+                   1.0, # 30-34
+                   1.9, # 35 - 39
+                   3.5, # 40-44
+                   5.7, # 45-49
+                   9.5, # 50 - 54
+                   15.0, # 55 - 59
+                   22.0, # 60-64
+                   28.1, # 65-69
+                   31.0, # 70 - 74
+                   35.3, # 75-79
+                   36.3, # 80-84
+                   33.5, # 85-89
+                   30.3, # 90-94 
+                   26.5, # 95 - 100
+                   26) # 100
+  else # Female Prevalence Rates
+    p0_ <-         c(
+                   0.6, # 18-24
+                   0.8, # 25-29 
+                   1.2, # 30-34
+                   1.8, # 35 - 39
+                   2.6, # 40-44
+                   3.7, # 45-49
+                   6.0, # 50 - 54
+                   10.1, # 55 - 59
+                   15.6, # 60-64
+                   20.4, # 65-69
+                   24.2, # 70 - 74
+                   30.6, # 75-79
+                   33.2, # 80-84
+                   32.1, # 85-89
+                   30.7, # 90-94 
+                   26.5, # 95 - 100
+                   26)# 100
+  spline <- smooth.spline(ageClasses_, p0_, df = 15)
+  value_ <- predict(spline, age)$y
+  return(0.01*value_)
+
+}
+
+```
+
+For the incidence function I used the 2012 German incidence rates for males and females form the paper: Prävalenz und Inzidenz des dokumentierten Diabetes mellitus – Referenzauswertung für die Diabetes-Surveillance auf Basis von Daten aller gesetzlich Krankenversicherte. I assumed 2012 rates are same for 2022
+
+```{r incidence function, include=FALSE}
+
+getIncidence <- function(t, age, isMale) {
+  ageClasses_ <- c(16, 28, 42, 47,  52,  57,  62,  67, 72, 77, 82, 92.5, 100)
+  if(isMale) # Male incidence rates
+    lambda_ <-   c(0.05, 0.2, 0.6,  0.9, 1.4, 2.0, 2.6, 2.9, 3.0, 3.3, 3.3, 3.1, 2.9) 
+  else # Female incidence rates
+    lambda_ <- c(0.05, 0.2, 0.4, 0.6, 0.9, 1.4, 1.8, 2.1, 2.5, 3.0, 3.0, 2.9, 2.7)
+  value_ <- approx(ageClasses_, lambda_, age, rule = 2)$y
+  return(0.01*value_) 
+}
+
+
+```
+
+For the mortality function, I used the German general mortality rates for males and females from the brinks r code (same as I did in the thesis)
+
+```{r Mortality Function, include=FALSE}
+# averaged mortality rates from the Brinks code
+
+mort <- function(year_, age_, isMale_)
+# returns the age- and sex-specific mortality in the L1-scenario
+{
+   if(isMale_)
+   {
+     intercept_ <- -10.42695007   - 0.03541973   * year_
+     slope_     <-   0.0957131514 + 0.0002881995 * year_
+   }
+   else
+   {
+     intercept_ <- -12.7224164    - 0.0473842    * year_
+     slope_     <-   0.1189358782 + 0.0004112266 * year_
+   }
+   return(exp(intercept_ + age_ * slope_))
+}
+
+
+```
+
+For the mortality risk ratio function, I used the German mortality risk ratios from the 2019 RKI diabetes surveillance (the same I did for my thesis) 
+
+```{r risk ratio, include=FALSE}
+RR_female <- c(6.76, 4.10, 4.86, 3.59, 3.12, 2.70, 2.14, 1.98, 1.94, 1.84, 1.57, 1.37, 1.23, 1.13)
+RR_male <- c(6.87, 5.01, 3.79, 3.27, 2.46, 2.16, 1.85, 1.67, 1.71, 1.65, 1.45, 1.29, 1.20, 1.11)
+
+log(RR_male)
+
+log(RR_female)
+
+```
+
+
+```{r include=FALSE}
+getR <- function(t_, age_, isMale){
+  ag_ <- c(30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95)
+  if(isMale) # male risk ratios
+    logR_ <- c(1.9271641, 1.6114359, 1.3323660, 1.1847900, 0.9001613, 0.7701082, 0.6151856, 0.5128236, 0.5364934, 0.5007753, 0.3715636, 0.2546422, 0.1823216, 0.1043600)
+  else # female risk ratios
+    logR_ <- c(1.9110229, 1.4109870, 1.5810384, 1.2781522, 1.1378330, 0.9932518, 0.7608058, 0.6830968, 0.6626880, 0.6097656, 0.4510756, 0.3148107, 0.2070142, 0.1222176)
+  value_ <- approx(ag_, logR_, age_, rule = 2)$y
+  return(exp(value_)) # exp to return the risk ratio 
+  
+}
+
+```
+
+
+```{r rhs, include=FALSE}
+
+rhs <- function(a, y, parms) 
+
+{
+   with(as.list(parms), 
+   {
+      R   <- getR(t0 + a, a, isMale)
+      inc <- getIncidence(t0 + a, a, isMale)
+      m   <- mort(a + t0, a, isMale)
+      # next line is the differential equation
+      dy  <- (1 - y) * (inc - m * y * (R - 1)/(y * (R - 1) + 1)) 
+      list(dy)
+   }   )
+}
+```
+
+
+```{r pde, include=FALSE}
+
+
+################################################################################
+#     MALES
+################################################################################
+
+#compute the prevalence in the upper part of the (t,a)-plane
+for(as in 0:83){
+  y_         <- get_p0(16 + as, TRUE)      #initial condition
+  a_         <- (16 + as):100              #which as to be used
+  x          <- c(p = y_)
+  parms      <- c(isMale = TRUE, t0 = - as - 88)
+  
+  #now solve the differential equation
+  out_       <- as.data.frame(rk4(x, a_, rhs, parms))
+  
+  #store the prevalences at the right locations
+  for(ii in 1:(85-as)){
+      p_m[as + ii, ii] <- out_$p[ii]
+  }
+}
+
+#compute the prevalence in the lower part of the (t,a)-plane
+for(ts in 0:83){
+  y_         <- 0.002
+  a_         <- 16:(100-ts)  
+  x          <- c(p = y_)
+  parms      <- c(isMale = TRUE, t0 = ts - 87)
+  out_       <- as.data.frame(rk4(x, a_, rhs, parms))
+  for(ii in 1:(84-ts)){
+      p_m[ii, ts + 1 + ii] <- out_$p[ii]
+  }
+}
+
+################################################################################
+#     FEMALES
+################################################################################
+
+# upper part of (t,a)-plane
+for(as in 0:83){
+  y_         <- get_p0(16 + as, FALSE)
+  a_         <- (16 + as):100
+  x          <- c(p = y_)
+  parms      <- c(isMale = FALSE, t0 = - as - 88)
+  out_       <- as.data.frame(rk4(x, a_, rhs, parms))
+  for(ii in 1:(85-as)){
+      p_f[as + ii, ii] <- out_$p[ii]
+  }
+}
+
+#lower part of (t,a)-plane
+for(ts in 0:83){
+  y_         <- 0.002
+  a_         <- 16:(100-ts)  
+  x          <- c(p = y_)
+  parms      <- c(isMale = FALSE, t0 = ts - 87)
+  out_       <- as.data.frame(rk4(x, a_, rhs, parms))
+  for(ii in 1:(84-ts)){
+      p_f[ii, ts + 1 + ii] <- out_$p[ii]
+  }
+}
+
+################################################################################
+
+
+```
+
+<br> 
+
+# Prevalence Rates by Age
+
+Results are similar to scenario 2 in the Tönnies paper using the same PDE.  
+
+
+http://link.springer.com/10.1007/s00103-019-03068-9 
+
+
+## Males
+
+```{r echo=FALSE}
+
+
+m_data_2022 <- numeric(85)
+m_data_2025 <- numeric(85)
+m_data_2030 <- numeric(85)
+m_data_2035 <- numeric(85)
+m_data_2040 <- numeric(85)
+m_data_2043 <- numeric(85)
+
+for (a in 1:85) {
+
+  year_2022 <- 1
+
+  m_data_2022[a] <- p_m[a,year_2022]
+
+  year_2025 <- 4
+  
+  m_data_2025[a] <- p_m[a, year_2025]
+
+  year_2030 <- 9
+  
+  m_data_2030[a] <- p_m[a, year_2030]
+
+  year_2035 <- 14
+  m_data_2035[a] <- p_m[a, year_2035]
+    
+  year_2040 <- 19
+  m_data_2040[a] <- p_m[a, year_2040]
+
+  year_2043 <- 22
+  
+  m_data_2043[a] <- p_m[a, year_2043]
+}
+
+
+males_age_year <- data.frame(age = 16:100, prev_2022 = m_data_2022, prev_2025 = m_data_2025, prev_2030 = m_data_2030, prev_2035 = m_data_2035, prev_2040 = m_data_2040, prev_2043 = m_data_2043)
+
+long_males_age_year <- males_age_year %>%
+  select(age, prev_2022, prev_2025, prev_2030, prev_2035, prev_2040, prev_2043) %>%
+  pivot_longer(-age, names_to = "year", values_to = "prev")
+
+ggplot(long_males_age_year, aes(x = age, y = prev, colour = year)) +
+  geom_line() +
+  theme_bw() +
+  labs(x = "Age", y = "Prevalence Rate") +
+  scale_x_continuous(n.breaks = 10) +
+  coord_cartesian(xlim = c(16, 100)) +
+  scale_y_continuous(n.breaks = 10)  +
+  scale_color_manual(values = c25, name = "Year", labels = c("2022", "2025", "2030", "2035", "2040", "2043"))
+
+```
+
+
+## Females
+
+```{r echo=FALSE}
+
+f_data_2022 <- numeric(85)
+f_data_2025 <- numeric(85)
+f_data_2030 <- numeric(85)
+f_data_2035 <- numeric(85)
+f_data_2040 <- numeric(85)
+f_data_2043 <- numeric(85)
+
+for (a in 1:85) {
+
+  year_2022 <- 1
+
+  f_data_2022[a] <- p_f[a,year_2022]
+
+  year_2025 <- 4
+  
+  f_data_2025[a] <- p_f[a, year_2025]
+
+  year_2030 <- 9
+  
+  f_data_2030[a] <- p_f[a, year_2030]
+
+  year_2035 <- 14
+  f_data_2035[a] <- p_f[a, year_2035]
+    
+  year_2040 <- 19
+  f_data_2040[a] <- p_f[a, year_2040]
+
+  year_2043 <- 22
+  
+  f_data_2043[a] <- p_f[a, year_2043]
+}
+
+
+females_age_year <- data.frame(age = 16:100, prev_2022 = f_data_2022, prev_2025 = f_data_2025, prev_2030 = f_data_2030, prev_2035 = f_data_2035, prev_2040 = f_data_2040, prev_2043 = f_data_2043)
+
+long_females_age_year <- females_age_year %>%
+  select(age, prev_2022, prev_2025, prev_2030, prev_2035, prev_2040, prev_2043) %>%
+  pivot_longer(-age, names_to = "year", values_to = "prev")
+
+ggplot(long_females_age_year, aes(x = age, y = prev, colour = year)) +
+  geom_line() +
+  theme_bw() +
+  labs(x = "Age", y = "Prevalence Rate") +
+  scale_x_continuous(n.breaks = 10) +
+  coord_cartesian(xlim = c(16, 100)) +
+  scale_y_continuous(n.breaks = 10)  +
+  scale_color_manual(values = c25, name = "Year", labels = c("2022", "2025", "2030", "2035", "2040", "2043"))
+```
+
+
+
+# Total Diabetics in 1000s
+
+Prevalence rates multiplied by population projections for males and females. I used population projections for Germany, variant 2 2022-2043.
+
+
+```{r number of diabetics, include=FALSE}
+# Males 
+
+
+m_diabetics_total <- numeric(22)
+m_diabetics_18_24 <- numeric(22)
+m_diabetics_25_39 <- numeric(22)
+m_diabetics_40_59 <- numeric(22)
+m_diabetics_60_74 <- numeric(22)
+m_diabetics_75_85 <- numeric(22)
+m_diabetics_86_90 <- numeric(22)
+m_diabetics_91_95 <- numeric(22)
+m_diabetics_96_100 <- numeric(22)
+
+
+for(year in 1:22){
+  
+  myages <- c(1:85)
+  m_diabetics_total[year] <- sum(p_m[myages, year] * m[year, 1:85], na.rm = T)
+  
+  myages_18_24 <- c(3:9)
+  m_diabetics_18_24[year] <- sum(p_m[myages_18_24, year] * m[year, 3:9], na.rm = T)
+  
+  myages_25_39 <- c(10:24)
+  m_diabetics_25_39[year] <- sum(p_m[myages_25_39, year] * m[year, 10:24], na.rm = T)
+  
+  myages_40_59 <- c(25:44)
+  m_diabetics_40_59[year] <- sum(p_m[myages_40_59, year] * m[year, 25:44], na.rm = T)
+  
+  myages_60_74 <- c(45:59)
+  m_diabetics_60_74[year] <- sum(p_m[myages_60_74, year] * m[year, 45:59], na.rm = T)
+  
+  myages_75_85 <- c(60:70)
+  m_diabetics_75_85[year] <- sum(p_m[myages_75_85, year] * m[year, 60:70], na.rm = T)
+  
+  myages_86_90 <- c(71:75)
+  m_diabetics_86_90[year] <- sum(p_m[myages_86_90, year] * m[year, 71:75], na.rm = T)
+  
+  myages_91_95 <- c(76:80)
+  m_diabetics_91_95[year] <- sum(p_m[myages_91_95, year] * m[year, 76:80], na.rm = T)
+
+  myages_96_100 <- c(81:85)
+  m_diabetics_96_100[year] <- sum(p_m[myages_96_100, year] * m[year, 81:85], na.rm = T)  
+  
+}
+
+
+
+# Females
+
+f_diabetics_total <- numeric(22)
+f_diabetics_18_24 <- numeric(22)
+f_diabetics_25_39 <- numeric(22)
+f_diabetics_40_59 <- numeric(22)
+f_diabetics_60_74 <- numeric(22)
+f_diabetics_75_85 <- numeric(22)
+f_diabetics_86_90 <- numeric(22)
+f_diabetics_91_95 <- numeric(22)
+f_diabetics_96_100 <- numeric(22)
+
+
+for(year in 1:22){
+  
+  myages <- c(1:85)
+  f_diabetics_total[year] <- sum(p_f[myages, year] * f[year, 1:85], na.rm = T)
+  
+  myages_18_24 <- c(3:9)
+  f_diabetics_18_24[year] <- sum(p_f[myages_18_24, year] * f[year, 3:9], na.rm = T)
+  
+  myages_25_39 <- c(10:24)
+  f_diabetics_25_39[year] <- sum(p_f[myages_25_39, year] * f[year, 10:24], na.rm = T)
+  
+  myages_40_59 <- c(25:44)
+  f_diabetics_40_59[year] <- sum(p_f[myages_40_59, year] * f[year, 25:44], na.rm = T)
+  
+  myages_60_74 <- c(45:59)
+  f_diabetics_60_74[year] <- sum(p_f[myages_60_74, year] * f[year, 45:59], na.rm = T)
+  
+  myages_75_85 <- c(60:70)
+  f_diabetics_75_85[year] <- sum(p_f[myages_75_85, year] * f[year, 60:70], na.rm = T)
+  
+  myages_86_90 <- c(71:75)
+  f_diabetics_86_90[year] <- sum(p_f[myages_86_90, year] * f[year, 71:75], na.rm = T)
+  
+  myages_91_95 <- c(76:80)
+  f_diabetics_91_95[year] <- sum(p_f[myages_91_95, year] * f[year, 76:80], na.rm = T)
+
+  myages_96_100 <- c(81:85)
+  f_diabetics_96_100[year] <- sum(p_f[myages_96_100, year] * f[year, 81:85], na.rm = T)  
+  
+}
+
+
+```
+
+<br>
+
+```{r combine age groups into one dataframe, include=FALSE}
+
+male_diabetics <- data.frame(year = 2022:2043,
+                                  total_diabetics = m_diabetics_total*1000,
+                                  diabetics_18_24 = m_diabetics_18_24*1000, 
+                                  diabetics_25_39 = m_diabetics_25_39*1000, 
+                                  diabetics_40_59 = m_diabetics_40_59*1000, 
+                                  diabetics_60_74 = m_diabetics_60_74*1000, 
+                                  diabetics_75_85 = m_diabetics_75_85*1000,
+                                  diabetics_86_90 = m_diabetics_86_90*1000,
+                                  diabetics_91_95 = m_diabetics_91_95*1000,
+                                  diabetics_96_100 = m_diabetics_96_100*1000)
+
+female_diabetics <- data.frame(year = 2022:2043,
+                                  total_diabetics = f_diabetics_total*1000,
+                                  diabetics_18_24 = f_diabetics_18_24*1000, 
+                                  diabetics_25_39 = f_diabetics_25_39*1000, 
+                                  diabetics_40_59 = f_diabetics_40_59*1000, 
+                                  diabetics_60_74 = f_diabetics_60_74*1000, 
+                                  diabetics_75_85 = f_diabetics_75_85*1000,
+                                  diabetics_86_90 = f_diabetics_86_90*1000,
+                                  diabetics_91_95 = f_diabetics_91_95*1000,
+                                  diabetics_96_100 = f_diabetics_96_100*1000)
+
+diabetics <- data.frame(year = 2022:2043, 
+                        male = male_diabetics$total_diabetics/1000,
+                        female = female_diabetics$total_diabetics/1000,
+                        germany = (male_diabetics$total_diabetics/1000) + (female_diabetics$total_diabetics/1000),
+                        bavaria = c(1343.386, 1381.927, 1414.340, 1441.426, 1466.663, 1493.646, 1516.788, 1541.243, 1559.947, 1578.812, 1596.010, 1611.969, 1624.537, 1639.907, 1652.641, 1667.415, 1682.537, 1698.558, 1713.062, 1727.996, 1742.395, 1758.158))
+
+
+```
+
+
+```{r echo=FALSE}
+diabetics %>% 
+  kable()
+```
+
+
